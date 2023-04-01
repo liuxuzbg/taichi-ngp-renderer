@@ -296,6 +296,7 @@ class NGP_fw:
         return directions.reshape(-1, 3)
 
     @ti.kernel
+    # 根据图像w,h,相机内参(fx,fy,cx,cy)计算出每个pixel的方向(dx,dy,1)
     def init_direction(self, w: ti.i32, h: ti.i32):
         for i, j in ti.ndrange(w, h):
             ori_w = 2*self.K[None][0, 2]
@@ -442,11 +443,14 @@ class NGP_fw:
 
 
     @ti.kernel
+    # for each ray generate random noise offset (nx,ny in [-1,1])
     def gen_noise_buffer(self):
         for i in range(self.N_rays):
             self.noise_buffer[i] = random_normal()
             # self.noise_buffer[i] = random_in_unit_disk()
 
+    # dof: consider len's distortion
+    # dist_to_focus=1.2 len_dis=0.04
     @ti.kernel
     def ray_intersect_dof(self, dist_to_focus: float, len_dis: float):
         ti.block_local(self.pose)
@@ -476,6 +480,9 @@ class NGP_fw:
             self.rays_o[i] = ray_o
             self.rays_d[i] = ray_d
 
+    # for each ray get intersect with aabb box
+    # self.hits_t: two intersect point t1&t2
+    # self.rays_o,self.rays_d (ray in world coord)
     @ti.kernel
     def ray_intersect(self):
         ti.block_local(self.pose)
