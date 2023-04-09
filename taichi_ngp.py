@@ -205,6 +205,7 @@ class NGP_fw:
         self.model_launch = ti.field(ti.i32, shape=())
 
         # buffer for the alive rays
+        # why times 2?
         self.alive_indices = ti.field(ti.i32, shape=(2*self.N_rays,))
 
         # padd the thread to the factor of block size (thread per block)
@@ -526,15 +527,17 @@ class NGP_fw:
             while (t<t2) & (s<N_samples):
                 # xyz = ray_o + t*ray_d
                 xyz = ray_o + t*ray_d
+                # dt is t regular in grid
                 dt = calc_dt(t, self.exp_step_factor, self.grid_size, self.scale)
                 mip = ti.max(mip_from_pos(xyz, self.cascades),
                              mip_from_dt(dt, self.grid_size, self.cascades))
 
-                mip_bound = ti.min(ti.pow(2., mip-1), self.scale)
+                mip_bound = ti.min(ti.pow(2., mip-1), self.scale) # current gird bound
                 # mip = 0
                 # mip_bound = 0.5
                 mip_bound_inv = 1/mip_bound
 
+                # nxyz is xyz regular in grid
                 nxyz = ti.math.clamp(0.5*(xyz*mip_bound_inv+1)*self.grid_size, 0.0, self.grid_size-1.0)
                 # nxyz = ti.ceil(nxyz)
 
@@ -542,7 +545,7 @@ class NGP_fw:
                 # occ = density_grid_taichi[idx] > 5.912066756501768
                 occ = self.density_bitfield[ti.u32(idx//8)] & (1 << ti.u32(idx%8))
 
-                if occ:
+                if occ: # if occ, get one smaple in ray
                     sn = start_idx + s
                     for p in ti.static(range(3)):
                         self.xyzs[sn][p] = xyz[p]
@@ -554,7 +557,7 @@ class NGP_fw:
                     self.hits_t[r][0] = t
                     s += 1
 
-                else:
+                else: # if not occ, ray marching
                     txyz = (((nxyz+0.5+0.5*ti.math.sign(ray_d))*grid_size_inv*2-1)*mip_bound-xyz)*d_inv
 
                     t_target = t + ti.max(0, txyz.min())
@@ -656,9 +659,9 @@ class NGP_fw:
             hid2 = ti.simt.block.SharedArray((self.net_width, block_dim), data_type)
             for i in ti.static(range(self.sigma_sm_preload)):
                 k = tid*self.sigma_sm_preload+i
-                weight[k] = self.sigma_weights[k]
+                weight[k] = self.sigma_weights[k] # mlp weight?
             for i in ti.static(range(self.sigma_n_input)):
-                input_val[i, tid] = self.xyzs_embedding[sn, i]
+                input_val[i, tid] = self.xyzs_embedding[sn, i] # hash encode output
             ti.simt.block.sync()
 
             if sn < did_launch_num:
@@ -679,9 +682,9 @@ class NGP_fw:
                     hid2[i, tid] = temp
                 # ti.simt.block.sync()
 
-                self.out_1[self.temp_hit[sn]] = data_type(ti.exp(hid2[0, tid]))
+                self.out_1[self.temp_hit[sn]] = data_type(ti.exp(hid2[0, tid])) # sigma output
                 for i in ti.static(range(self.sigma_n_output)):
-                    self.final_embedding[sn, i] = hid2[i, tid]
+                    self.final_embedding[sn, i] = hid2[i, tid] # input to rgb mlp
                 
                 # ti.simt.block.sync()
 
@@ -704,19 +707,19 @@ class NGP_fw:
             if sn < did_launch_num:
                 
                 dir_ = self.dirs[ray_id]
-                input = dir_encode_func(dir_)
+                input = dir_encode_func(dir_) # direction encode,what about self.dir_encode()
 
                 for i in ti.static(range(16)):
-                    input[16+i] = self.final_embedding[sn, i]
+                    input[16+i] = self.final_embedding[sn, i] # contain position encode,sigma mlp output
 
                 for i in range(self.net_width):
                     temp = init_val[0]
                     for j in ti.static(range(self.rgb_n_input)):
-                        temp += input[j] * weight[i*self.rgb_n_input+j]
+                        temp += input[j] * weight[i*self.rgb_n_input+j] # mlp forward
 
                     hid1[i, tid] = temp
 
-                if ti.static(self.rgb_depth == 2):
+                if ti.static(self.rgb_depth == 2): # two mlp?
                     for i in range(self.net_width):
                         temp = init_val[0]
                         for j in ti.static(range(self.net_width)):
@@ -733,7 +736,7 @@ class NGP_fw:
 
 
                     for i in range(self.rgb_n_output):
-                        self.out_3[self.temp_hit[sn], i] = data_type(1 / (1 + ti.exp(-hid1[i, tid])))
+                        self.out_3[self.temp_hit[sn], i] = data_type(1 / (1 + ti.exp(-hid1[i, tid]))) # rgb output
                 else:
                     for i in range(self.rgb_n_output):
                         temp = init_val[0]
@@ -751,7 +754,7 @@ class NGP_fw:
 
     @ti.kernel
     def composite_test(self, max_samples: ti.i32, T_threshold: data_type):
-        for n in ti.ndrange(self.counter[None]):
+        for n in ti.ndrange(self.counter[None]): # for each ray
             N_samples = self.N_eff_samples[n]
             if N_samples != 0:
                 c_index = self.current_index[None]
@@ -766,21 +769,21 @@ class NGP_fw:
                 opacity_temp = tf_vec1(0.0)
                 out_3_temp = tf_vec3(0.0)
 
-                for s in range(N_samples):
+                for s in range(N_samples): # for each sample along ray
                     sn = start_idx + s
                     a = data_type(1.0 - ti.exp(-self.out_1[sn]*self.deltas[sn]))
-                    w = a * T
+                    w = a * T # opacity=1,T=0,w=0,in the air without rgb
 
                     for i in ti.static(range(3)):
                         out_3_temp[i] = self.out_3[sn, i]
 
-                    rgb_temp += w * out_3_temp
-                    depth_temp[0] += w * self.ts[sn]
-                    opacity_temp[0] += w
+                    rgb_temp += w * out_3_temp # sigma*rgb_out
+                    depth_temp[0] += w * self.ts[sn] # sigma*length
+                    opacity_temp[0] += w # occ=sum(sigma)
 
                     T *= data_type(1.0 - a)
 
-                    if T <= T_threshold:
+                    if T <= T_threshold: # if <0.01, de-alive, stop integral along ray
                         self.alive_indices[n*2+c_index] = -1
                         break
 
@@ -821,7 +824,7 @@ class NGP_fw:
         else:
             self.ray_intersect()
 
-        while samples < max_samples:
+        while samples < max_samples: # max_sample in one frame
             N_alive = self.counter[None]
             if N_alive == 0: break
 
@@ -830,11 +833,18 @@ class NGP_fw:
             samples += N_samples
             launch_model_total = N_alive * N_samples
             # print(f"samples: {samples}, N_alive: {N_alive}, N_samples: {N_samples}")
+            
+            # raymarching using cascades occ grids, to sampling sufface effective
             self.raymarching_test_kernel(N_samples)
+            
             self.rearange_index(launch_model_total)
+            # dir encode for direction
             # self.dir_encode()
+            # hash encode for position(xyz)
             self.hash_encode()
+            # sigma mlp
             self.sigma_layer()
+            # rgb mlp
             self.rgb_layer()
             # self.FullyFusedMLP()
             self.composite_test(N_samples, T_threshold)
